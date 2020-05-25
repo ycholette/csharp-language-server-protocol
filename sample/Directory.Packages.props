@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+    <Import Project="../Directory.Packages.props" />
+    <ItemGroup>
+        <PackageVersion Include="Microsoft.Extensions.Logging" Version="3.0.0" />
+        <PackageVersion Include="Serilog.Extensions.Logging" Version="3.0.1" />
+        <PackageVersion Include="Serilog.Sinks.File" Version="4.1.0" />
+        <PackageVersion Include="System.IO.FileSystem.Primitives" Version="4.3.0" />
+        <PackageVersion Include="System.IO" Version="4.3.0" />
+        <PackageVersion Include="System.Runtime.Handles" Version="4.3.0" />
+        <PackageVersion Include="System.Text.Encoding" Version="4.3.0" />
+        <PackageVersion Include="System.Text.Encoding.Extensions" Version="4.3.0" />
+        <PackageVersion Include="System.Threading.Tasks" Version="4.3.0" />
+        <PackageVersion Include="System.IO.Pipelines" Version="4.7.1" />
+    </ItemGroup>
+</Project>
