@@ -63,7 +63,7 @@ namespace Dap.Tests.Integration
 
             workDoneObserver.OnNext(
                 new ProgressUpdateEvent {
-                    Percentage = 30,
+                    Percentage = 33,
                     Message = "Report 3"
                 }
             );
