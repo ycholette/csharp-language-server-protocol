@@ -55,8 +55,8 @@ namespace OmniSharp.Extensions.JsonRpc
             pipeWriter,
             serializer,
             receiver,
-            TaskPoolScheduler.Default,
-            //new EventLoopScheduler(_ => new Thread(_) { IsBackground = true, Name = "OutputHandler" }),
+//            TaskPoolScheduler.Default,
+            new EventLoopScheduler(_ => new Thread(_) { IsBackground = true, Name = "OutputHandler" }),
             logger
         )
         {
