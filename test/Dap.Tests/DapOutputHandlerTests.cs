@@ -1,6 +1,9 @@
+using System;
+using System.Buffers;
 using System.IO;
 using System.IO.Pipelines;
 using System.Reactive.Concurrency;
+using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -17,11 +20,18 @@ namespace Dap.Tests
 {
     public class DapOutputHandlerTests
     {
+        private CancellationToken _cancellationToken;
+
+        public DapOutputHandlerTests()
+        {
+            _cancellationToken = new CancellationTokenSource(TimeSpan.FromMinutes(1)).Token;
+        }
+
         private static OutputHandler NewHandler(PipeWriter writer)
         {
             var rec = Substitute.For<IReceiver>();
             rec.ShouldFilterOutput(Arg.Any<object>()).Returns(true);
-            return new OutputHandler(writer, new DapSerializer(), rec, Scheduler.Immediate, NullLogger<OutputHandler>.Instance);
+            return new OutputHandler(writer, new DapSerializer(), rec, NullLogger<OutputHandler>.Instance);
         }
 
         [Fact]
@@ -36,10 +46,8 @@ namespace Dap.Tests
             );
 
             handler.Send(value);
-            await handler.WriteAndFlush();
 
-            using var reader = new StreamReader(pipe.Reader.AsStream());
-            var received = await reader.ReadToEndAsync();
+            var received = await GetReceived(pipe, handler, _cancellationToken);
 
             const string send =
                 "Content-Length: 88\r\n\r\n{\"seq\":1,\"type\":\"response\",\"request_seq\":1,\"success\":true,\"command\":\"command\",\"body\":{}}";
@@ -58,10 +66,8 @@ namespace Dap.Tests
             };
 
             handler.Send(value);
-            await handler.WriteAndFlush();
 
-            using var reader = new StreamReader(pipe.Reader.AsStream());
-            var received = await reader.ReadToEndAsync();
+            var received = await GetReceived(pipe, handler, _cancellationToken);
 
             const string send =
                 "Content-Length: 51\r\n\r\n{\"seq\":1,\"type\":\"event\",\"event\":\"method\",\"body\":{}}";
@@ -81,10 +87,8 @@ namespace Dap.Tests
             };
 
             handler.Send(value);
-            await handler.WriteAndFlush();
 
-            using var reader = new StreamReader(pipe.Reader.AsStream());
-            var received = await reader.ReadToEndAsync();
+            var received = await GetReceived(pipe, handler, _cancellationToken);
 
             const string send =
                 "Content-Length: 60\r\n\r\n{\"seq\":1,\"type\":\"request\",\"command\":\"method\",\"arguments\":{}}";
@@ -100,14 +104,31 @@ namespace Dap.Tests
             var value = new RpcError(1, new ErrorMessage(1, "something", "data"));
 
             handler.Send(value);
-            await handler.WriteAndFlush();
 
-            using var reader = new StreamReader(pipe.Reader.AsStream());
-            var received = await reader.ReadToEndAsync();
+            var received = await GetReceived(pipe, handler, _cancellationToken);
 
             const string send =
                 "Content-Length: 148\r\n\r\n{\"seq\":1,\"type\":\"response\",\"request_seq\":1,\"success\":false,\"command\":\"\",\"message\":\"something\",\"body\":{\"code\":1,\"data\":\"data\",\"message\":\"something\"}}";
             received.Should().Be(send);
+        }
+
+        private static async Task<string> GetReceived(Pipe pipe, OutputHandler handler, CancellationToken cancellationToken)
+        {
+            var lastBufferLength = 0L;
+            while (true)
+            {
+                var result = await pipe.Reader.ReadAsync(cancellationToken);
+                if (lastBufferLength > 0 && lastBufferLength == result.Buffer.Length)
+                {
+                    var span = new byte[result.Buffer.Length].AsMemory();
+                    result.Buffer.Slice(0, result.Buffer.Length).CopyTo(span.Span);
+                    return System.Text.Encoding.UTF8.GetString(span.Span);
+                }
+                lastBufferLength = result.Buffer.Length;
+                pipe.Reader.AdvanceTo(result.Buffer.Start);
+
+                await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+            }
         }
     }
 }

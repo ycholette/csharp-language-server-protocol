@@ -1,7 +1,9 @@
 using System;
+using System.Buffers;
 using System.IO;
 using System.IO.Pipelines;
 using System.Reactive.Concurrency;
+using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -17,18 +19,25 @@ namespace JsonRpc.Tests
 {
     public class OutputHandlerTests
     {
+        private CancellationToken _cancellationToken;
+
+        public OutputHandlerTests()
+        {
+            _cancellationToken = new CancellationTokenSource(TimeSpan.FromMinutes(1)).Token;
+        }
+
         private static OutputHandler NewHandler(PipeWriter writer)
         {
             var rec = Substitute.For<IReceiver>();
             rec.ShouldFilterOutput(Arg.Any<object>()).Returns(true);
-            return new OutputHandler(writer, new JsonRpcSerializer(), rec, Scheduler.Immediate, NullLogger<OutputHandler>.Instance);
+            return new OutputHandler(writer, new JsonRpcSerializer(), rec, NullLogger<OutputHandler>.Instance);
         }
 
         private static OutputHandler NewHandler(PipeWriter writer, Func<object, bool> filter)
         {
             var rec = Substitute.For<IReceiver>();
             rec.ShouldFilterOutput(Arg.Any<object>()).Returns(_ => filter(_.ArgAt<object>(0)));
-            return new OutputHandler(writer, new JsonRpcSerializer(), rec, Scheduler.Immediate, NullLogger<OutputHandler>.Instance);
+            return new OutputHandler(writer, new JsonRpcSerializer(), rec, NullLogger<OutputHandler>.Instance);
         }
 
         [Fact]
@@ -39,12 +48,9 @@ namespace JsonRpc.Tests
 
             var value = new OutgoingResponse(1, 1, new Request(1, "a", null));
 
-
             handler.Send(value);
-            await handler.WriteAndFlush();
 
-            using var reader = new StreamReader(pipe.Reader.AsStream());
-            var received = await reader.ReadToEndAsync();
+            var received = await GetReceived(pipe, handler, _cancellationToken);
 
             const string send = "Content-Length: 35\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":1}";
             received.Should().Be(send);
@@ -62,12 +68,9 @@ namespace JsonRpc.Tests
                 Params = new object()
             };
 
-
             handler.Send(value);
-            await handler.WriteAndFlush();
 
-            using var reader = new StreamReader(pipe.Reader.AsStream());
-            var received = await reader.ReadToEndAsync();
+            var received = await GetReceived(pipe, handler, _cancellationToken);
 
             const string send = "Content-Length: 47\r\n\r\n{\"jsonrpc\":\"2.0\",\"method\":\"method\",\"params\":{}}";
             received.Should().Be(send);
@@ -87,10 +90,8 @@ namespace JsonRpc.Tests
 
 
             handler.Send(value);
-            await handler.WriteAndFlush();
 
-            using var reader = new StreamReader(pipe.Reader.AsStream());
-            var received = await reader.ReadToEndAsync();
+            var received = await GetReceived(pipe, handler, _cancellationToken);
 
             const string send =
                 "Content-Length: 54\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"method\",\"params\":{}}";
@@ -107,10 +108,8 @@ namespace JsonRpc.Tests
 
 
             handler.Send(value);
-            await handler.WriteAndFlush();
 
-            using var reader = new StreamReader(pipe.Reader.AsStream());
-            var received = await reader.ReadToEndAsync();
+            var received = await GetReceived(pipe, handler, _cancellationToken);
 
             const string send =
                 "Content-Length: 75\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":1,\"data\":{},\"message\":\"something\"}}";
@@ -130,14 +129,31 @@ namespace JsonRpc.Tests
             handler.Send(value);
             handler.Send(value2);
             handler.Send(value3);
-            await handler.WriteAndFlush();
 
-            using var reader = new StreamReader(pipe.Reader.AsStream());
-            var received = await reader.ReadToEndAsync();
+            var received = await GetReceived(pipe, handler, _cancellationToken);
 
             const string send =
                 "Content-Length: 75\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":1,\"data\":{},\"message\":\"something\"}}";
             received.Should().Be(send);
+        }
+
+        private static async Task<string> GetReceived(Pipe pipe, OutputHandler handler, CancellationToken cancellationToken)
+        {
+            var lastBufferLength = 0L;
+            while (true)
+            {
+                var result = await pipe.Reader.ReadAsync(cancellationToken);
+                if (lastBufferLength > 0 && lastBufferLength == result.Buffer.Length)
+                {
+                    var span = new byte[result.Buffer.Length].AsMemory();
+                    result.Buffer.Slice(0, result.Buffer.Length).CopyTo(span.Span);
+                    return System.Text.Encoding.UTF8.GetString(span.Span);
+                }
+                lastBufferLength = result.Buffer.Length;
+                pipe.Reader.AdvanceTo(result.Buffer.Start);
+
+                await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+            }
         }
     }
 }

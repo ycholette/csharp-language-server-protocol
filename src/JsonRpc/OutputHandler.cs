@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.IO.Pipelines;
 using System.Reactive.Concurrency;
@@ -16,62 +17,46 @@ namespace OmniSharp.Extensions.JsonRpc
     {
         private readonly PipeWriter _pipeWriter;
         private readonly ISerializer _serializer;
+        private readonly IReceiver _receiver;
         private readonly ILogger<OutputHandler> _logger;
-        private readonly Subject<object> _queue;
+        private readonly BlockingCollection<object> _queue;
         private readonly TaskCompletionSource<object> _outputIsFinished;
         private readonly CompositeDisposable _disposable;
+        private readonly CancellationTokenSource _done;
+        private bool _triggerShutDown = false;
 
         public OutputHandler(
             PipeWriter pipeWriter,
             ISerializer serializer,
             IReceiver receiver,
-            IScheduler scheduler,
             ILogger<OutputHandler> logger
         )
         {
             _pipeWriter = pipeWriter;
             _serializer = serializer;
+            _receiver = receiver;
             _logger = logger;
-            _queue = new Subject<object>();
+            _queue = new BlockingCollection<object>();
             _outputIsFinished = new TaskCompletionSource<object>();
+            _done = new CancellationTokenSource();
+            Task.Run(() => HandleOutputStream(_done.Token), _done.Token);
 
             _disposable = new CompositeDisposable {
-                _queue
-                   .ObserveOn(scheduler)
-                   .Where(receiver.ShouldFilterOutput)
-                   .Select(value => Observable.FromAsync(ct => ProcessOutputStream(value, ct)))
-                   .Concat()
-                   .Subscribe(),
-                _queue
+                _queue,
+                _done
             };
-        }
-
-        public OutputHandler(
-            PipeWriter pipeWriter,
-            ISerializer serializer,
-            IReceiver receiver,
-            ILogger<OutputHandler> logger
-        ) : this(
-            pipeWriter,
-            serializer,
-            receiver,
-//            TaskPoolScheduler.Default,
-            new EventLoopScheduler(_ => new Thread(_) { IsBackground = true, Name = "OutputHandler" }),
-            logger
-        )
-        {
         }
 
         public void Send(object value)
         {
-            if (_queue.IsDisposed) return;
-            _queue.OnNext(value);
+            if (_queue.IsCompleted) return;
+            if (_queue.IsAddingCompleted) return;
+            _queue.Add(value);
         }
 
         public async Task StopAsync()
         {
             await _pipeWriter.CompleteAsync();
-            _disposable.Dispose();
         }
 
         /// <summary>
@@ -79,10 +64,25 @@ namespace OmniSharp.Extensions.JsonRpc
         /// </summary>
         /// <returns></returns>
         [EditorBrowsable(EditorBrowsableState.Never)]
-        internal async Task WriteAndFlush()
+        internal void TriggerShutdown()
         {
-            await _pipeWriter.FlushAsync();
-            await _pipeWriter.CompleteAsync();
+            _triggerShutDown = true;
+            _queue.CompleteAdding();
+        }
+
+        private async Task HandleOutputStream(CancellationToken cancellationToken)
+        {
+            while (!(cancellationToken.IsCancellationRequested || _queue.IsCompleted) && !_triggerShutDown)
+            {
+                while (_queue.TryTake(out var value, 100, cancellationToken))
+                {
+                    if (!_receiver.ShouldFilterOutput(value)) continue;
+                    await ProcessOutputStream(value, cancellationToken);
+                }
+                _logger.LogTrace("OutputHandler timeout, restarting");
+            }
+
+            _outputIsFinished.TrySetResult(null);
         }
 
         private async Task ProcessOutputStream(object value, CancellationToken cancellationToken)
@@ -112,8 +112,8 @@ namespace OmniSharp.Extensions.JsonRpc
 
         private void Error(Exception ex)
         {
+            _done.Cancel();
             _outputIsFinished.TrySetResult(ex);
-            _disposable.Dispose();
         }
 
         public void Dispose()
